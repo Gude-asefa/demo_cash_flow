@@ -1,10 +1,12 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import joblib
 import os
+import io
+import hashlib
+import tempfile
 from sklearn.metrics import mean_absolute_error, r2_score
 
 # ─── Page configuration ──────────────────────────────────────────────────────
@@ -28,7 +30,6 @@ st.markdown("""
         border-right: 1px solid #1e2d4a;
     }
 
-    /* Metric cards */
     [data-testid="metric-container"] {
         background: linear-gradient(135deg, #0d1a36 0%, #111d3a 100%);
         border: 1px solid #1e3a6e;
@@ -51,29 +52,6 @@ st.markdown("""
     [data-testid="stDataFrame"] { border: 1px solid #1e3a6e; border-radius: 8px; overflow: hidden; }
     hr { border-color: #1e3a6e !important; }
 
-    /* Model selector tabs */
-    .model-tab-active {
-        background: linear-gradient(135deg, #1e3a6e, #2d5a9e);
-        border: 1px solid #3b82f6;
-        border-radius: 10px;
-        padding: 10px 14px;
-        color: #e0f0ff;
-        font-weight: 600;
-        font-size: 0.82rem;
-        text-align: center;
-        cursor: pointer;
-    }
-    .model-tab-inactive {
-        background: #0d1426;
-        border: 1px solid #1e2d4a;
-        border-radius: 10px;
-        padding: 10px 14px;
-        color: #4a6080;
-        font-size: 0.82rem;
-        text-align: center;
-        cursor: pointer;
-    }
-
     .info-box {
         background: #0d1e3a;
         border-left: 3px solid #3b82f6;
@@ -83,8 +61,15 @@ st.markdown("""
         font-size: 0.85rem;
         color: #a0bbd8;
     }
-
-    /* Expander */
+    .upload-box {
+        background: #0d1e3a;
+        border: 1px dashed #1e3a6e;
+        border-radius: 10px;
+        padding: 12px 16px;
+        margin: 6px 0;
+        font-size: 0.8rem;
+        color: #4a6080;
+    }
     [data-testid="stExpander"] {
         background: #0d1426 !important;
         border: 1px solid #1e2d4a !important;
@@ -106,105 +91,115 @@ def mape_score(y_true, y_pred):
     mask = y_true != 0
     return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
 
-# ─── Cached loaders ──────────────────────────────────────────────────────────
+def file_hash(b: bytes) -> str:
+    """MD5 of raw bytes — used as cache key so uploads bust the cache."""
+    return hashlib.md5(b).hexdigest()
+
+# ─── Cached loaders (keyed on content hash, not path) ────────────────────────
 @st.cache_resource(show_spinner="Loading model...")
-def load_model(model_path):
-    return joblib.load(model_path)
+def load_model_from_bytes(model_bytes: bytes, _hash: str):
+    """Write bytes to a temp file and load with joblib."""
+    with tempfile.NamedTemporaryFile(suffix=".joblib", delete=False) as tmp:
+        tmp.write(model_bytes)
+        tmp_path = tmp.name
+    model = joblib.load(tmp_path)
+    os.unlink(tmp_path)
+    return model
 
 @st.cache_data(show_spinner="Reading data files...")
-def load_data(features_path, target_path, mapping_path):
-    features = pd.read_csv(features_path)
-    target   = pd.read_csv(target_path)
-    mapping  = pd.read_csv(mapping_path)
+def load_data_from_bytes(features_bytes, target_bytes, mapping_bytes,
+                          _fhash, _thash, _mhash):
+    features = pd.read_csv(io.BytesIO(features_bytes))
+    target   = pd.read_csv(io.BytesIO(target_bytes))
+    mapping  = pd.read_csv(io.BytesIO(mapping_bytes))
     return features, target, mapping
 
 @st.cache_data(show_spinner="Running predictions...")
-def run_predictions(_model, features_path):
-    """
-    Reload features and cast categorical columns to match training dtype,
-    then run model.predict().
-    LightGBM stores the expected dtypes from training — if CSV loads them
-    as plain strings the model raises a 'categorical_feature do not match'
-    error. Casting fixes that.
-    """
+def run_predictions_from_bytes(model_bytes, features_bytes, _mhash, _fhash):
     CAT_COLS = [
         "branch_id", "day_of_the_week", "branch_district",
-        "is_weekend", "is_payday_window","is_spike",
-        
+        "is_weekend", "is_payday_window", "is_spike",
     ]
-    features = pd.read_csv(features_path)
+    # Re-load model from bytes
+    with tempfile.NamedTemporaryFile(suffix=".joblib", delete=False) as tmp:
+        tmp.write(model_bytes)
+        tmp_path = tmp.name
+    model = joblib.load(tmp_path)
+    os.unlink(tmp_path)
+
+    features = pd.read_csv(io.BytesIO(features_bytes))
     for col in CAT_COLS:
         if col in features.columns:
             features[col] = features[col].astype("category")
-    return _model.predict(features)
+    return model.predict(features)
+
+# ─── Helper: resolve a file to bytes ─────────────────────────────────────────
+def resolve_file(uploaded_file, local_path: str) -> bytes | None:
+    """
+    Return file bytes from whichever source is available:
+      1. An uploaded file object (from st.file_uploader)
+      2. A local path on disk (works when running locally with files present)
+    Returns None if neither is available.
+    """
+    if uploaded_file is not None:
+        return uploaded_file.read()
+    if local_path and os.path.exists(local_path):
+        with open(local_path, "rb") as f:
+            return f.read()
+    return None
 
 # ─── Default model registry ──────────────────────────────────────────────────
-# Edit these defaults to match your file names.
-# Add more entries (up to 6) for additional models.
-# Each entry: display label, model file, features CSV, actuals CSV, mapping CSV.
-
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
 DEFAULT_MODELS = [
     {
-        "label":    "All_branches_Cash Out",
-        "model":    "all_cash_out.joblib",
-        "features": "cash_out/all_out_features_for_test_dataset.csv",
-        "target":   "cash_out/all_out_target_for_test_dataset.csv",
-        "mapping":  "branch_id_to_name_mapping.csv",
-        "target_col": "teller_cash_out",
-    },
-    # ── Slot 2 ── uncomment and fill in when you have a second model
-    {
-        "label":    "All_branches_Cash In",
-        "model":    "all_cash_in.joblib",
-        "features": "cash_in/all_in_features_for_test_dataset.csv",
-        "target":   "cash_in/all_in_target_for_test_dataset.csv",
-        "mapping":  "branch_id_to_name_mapping.csv",
-        "target_col": "teller_cash_in",
-    },
-    {
-        "label":    "Addis_Ababa_region_Cash In",
-        "model":    "addis_cash_in.joblib",
-        "features": "cash_in/addis_in_features_for_test_dataset.csv",
-        "target":   "cash_in/addis_in_target_for_test_dataset.csv",
-        "mapping":  "branch_id_to_name_mapping.csv",
-        "target_col": "teller_cash_in",
-    },
-    {
-        "label":    "Addis_Ababa_region_Cash Out",
-        "model":    "addis_cash_out.joblib",
-        "features": "cash_out/addis_out_features_for_test_dataset.csv",
-        "target":   "cash_out/addis_out_target_for_test_dataset.csv",
-        "mapping":  "branch_id_to_name_mapping.csv",
+        "label":      "All_branches_Cash Out",
+        "model":      "all_cash_out.joblib",
+        "features":   "cash_out/all_out_features_for_test_dataset.csv",
+        "target":     "cash_out/all_out_target_for_test_dataset.csv",
+        "mapping":    "branch_id_to_name_mapping.csv",
         "target_col": "teller_cash_out",
     },
     {
-        "label":    "Other_regions_Cash In",
-        "model":    "regions_cash_in.joblib",
-        "features": "cash_in/other_regions_in_features_for_test_dataset.csv",
-        "target":   "cash_in/other_regions_in_target_for_test_dataset.csv",
-        "mapping":  "branch_id_to_name_mapping.csv",
+        "label":      "All_branches_Cash In",
+        "model":      "all_cash_in.joblib",
+        "features":   "cash_in/all_in_features_for_test_dataset.csv",
+        "target":     "cash_in/all_in_target_for_test_dataset.csv",
+        "mapping":    "branch_id_to_name_mapping.csv",
         "target_col": "teller_cash_in",
     },
     {
-        "label":    "Other_regions_Cash Out",
-        "model":    "regions_cash_out.joblib",
-        "features": "cash_out/other_regions_out_features_for_test_dataset.csv",
-        "target":   "cash_out/other_regions_out_target_for_test_dataset.csv",
-        "mapping":  "branch_id_to_name_mapping.csv",
+        "label":      "Addis_Ababa_region_Cash In",
+        "model":      "addis_cash_in.joblib",
+        "features":   "cash_in/addis_in_features_for_test_dataset.csv",
+        "target":     "cash_in/addis_in_target_for_test_dataset.csv",
+        "mapping":    "branch_id_to_name_mapping.csv",
+        "target_col": "teller_cash_in",
+    },
+    {
+        "label":      "Addis_Ababa_region_Cash Out",
+        "model":      "addis_cash_out.joblib",
+        "features":   "cash_out/addis_out_features_for_test_dataset.csv",
+        "target":     "cash_out/addis_out_target_for_test_dataset.csv",
+        "mapping":    "branch_id_to_name_mapping.csv",
         "target_col": "teller_cash_out",
     },
-    # ── Slot 3 ──
-    # {
-    #     "label":    "Model 3",
-    #     "model":    "model3.joblib",
-    #     "features": "features_model3_test.csv",
-    #     "target":   "target_model3_test.csv",
-    #     "mapping":  "branch_id_to_name_mapping.csv",
-    #     "target_col": "your_target_column_name",
-    # },
-    # ── Slots 4-6: same pattern ──
+    {
+        "label":      "Other_regions_Cash In",
+        "model":      "regions_cash_in.joblib",
+        "features":   "cash_in/other_regions_in_features_for_test_dataset.csv",
+        "target":     "cash_in/other_regions_in_target_for_test_dataset.csv",
+        "mapping":    "branch_id_to_name_mapping.csv",
+        "target_col": "teller_cash_in",
+    },
+    {
+        "label":      "Other_regions_Cash Out",
+        "model":      "regions_cash_out.joblib",
+        "features":   "cash_out/other_regions_out_features_for_test_dataset.csv",
+        "target":     "cash_out/other_regions_out_target_for_test_dataset.csv",
+        "mapping":    "branch_id_to_name_mapping.csv",
+        "target_col": "teller_cash_out",
+    },
 ]
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
@@ -218,25 +213,35 @@ with st.sidebar:
     selected_model_label = st.selectbox("Choose model to evaluate", model_labels)
     active_model_cfg = next(m for m in DEFAULT_MODELS if m["label"] == selected_model_label)
 
+    # Absolute local paths for this model slot
+    local_model    = os.path.join(base_dir, active_model_cfg["model"])
+    local_features = os.path.join(base_dir, active_model_cfg["features"])
+    local_target   = os.path.join(base_dir, active_model_cfg["target"])
+    local_mapping  = os.path.join(base_dir, active_model_cfg["mapping"])
+
+    # Check how many local files exist so we can show the right prompt
+    local_files_exist = all(os.path.exists(p) for p in [local_model, local_features, local_target, local_mapping])
+
     st.markdown("---")
 
-    # ── File path overrides ──
-    with st.expander("📁 Override File Paths", expanded=False):
-        st.markdown('<div class="info-box">By default the app looks in its own folder. Override any path here if your files are elsewhere.</div>', unsafe_allow_html=True)
-        custom_model    = st.text_input("Model (.joblib)",    value=os.path.join(base_dir, active_model_cfg["model"]))
-        custom_features = st.text_input("Features CSV",       value=os.path.join(base_dir, active_model_cfg["features"]))
-        custom_target   = st.text_input("Actuals CSV",        value=os.path.join(base_dir, active_model_cfg["target"]))
-        custom_mapping  = st.text_input("Branch Mapping CSV", value=os.path.join(base_dir, active_model_cfg["mapping"]))
-
-    model_path    = custom_model
-    features_path = custom_features
-    target_path   = custom_target
-    mapping_path  = custom_mapping
-    target_col    = active_model_cfg["target_col"]
+    # ── File upload section ──
+    # Only shown when local files are NOT present (i.e. deployed / other machine)
+    if local_files_exist:
+        st.markdown('<div class="info-box">✅ Local files detected — running automatically.</div>', unsafe_allow_html=True)
+        uploaded_model    = None
+        uploaded_features = None
+        uploaded_target   = None
+        uploaded_mapping  = None
+    else:
+        st.markdown("**📁 Upload Model Files**")
+        st.markdown('<div class="upload-box">Local files not found. Please upload the four files for the selected model.</div>', unsafe_allow_html=True)
+        uploaded_model    = st.file_uploader(f"Model (.joblib) — {active_model_cfg['model']}",    type=["joblib"], key=f"model_{selected_model_label}")
+        uploaded_features = st.file_uploader(f"Features CSV — {active_model_cfg['features']}",   type=["csv"],    key=f"feat_{selected_model_label}")
+        uploaded_target   = st.file_uploader(f"Actuals CSV — {active_model_cfg['target']}",      type=["csv"],    key=f"tgt_{selected_model_label}")
+        uploaded_mapping  = st.file_uploader(f"Branch Mapping CSV — {active_model_cfg['mapping']}", type=["csv"], key=f"map_{selected_model_label}")
 
     st.markdown("---")
     st.markdown("**🔍 Filters**")
-    # placeholder — will be repopulated after data loads
     district_placeholder = st.empty()
 
     st.markdown("---")
@@ -245,31 +250,47 @@ with st.sidebar:
     show_raw_table = st.checkbox("Show raw prediction table", value=False)
 
     st.markdown("---")
-    st.caption("Cash Prediction Dashboard v2.0")
-
+    st.caption("Cash Prediction Dashboard v2.1")
 
 # ─── Title ───────────────────────────────────────────────────────────────────
 st.markdown(f"# 💵 Cash Prediction Dashboard — {selected_model_label}")
 st.markdown("**Model performance evaluation across branches · Test dataset**")
 st.markdown("---")
 
-# ─── File existence check ─────────────────────────────────────────────────────
-missing = [p for p in [model_path, features_path, target_path, mapping_path] if not os.path.exists(p)]
-if missing:
-    st.error("⚠️ File(s) not found:")
-    for p in missing:
-        st.code(p)
-    st.info("Expand **Override File Paths** in the sidebar and correct the paths.")
+# ─── Resolve all four files to bytes ─────────────────────────────────────────
+model_bytes    = resolve_file(uploaded_model,    local_model)
+features_bytes = resolve_file(uploaded_features, local_features)
+target_bytes   = resolve_file(uploaded_target,   local_target)
+mapping_bytes  = resolve_file(uploaded_mapping,  local_mapping)
+
+missing_labels = []
+if model_bytes    is None: missing_labels.append(f"Model (.joblib) — `{active_model_cfg['model']}`")
+if features_bytes is None: missing_labels.append(f"Features CSV — `{active_model_cfg['features']}`")
+if target_bytes   is None: missing_labels.append(f"Actuals CSV — `{active_model_cfg['target']}`")
+if mapping_bytes  is None: missing_labels.append(f"Branch Mapping CSV — `{active_model_cfg['mapping']}`")
+
+if missing_labels:
+    st.warning("⚠️ Missing files. Please upload the following in the sidebar:")
+    for label in missing_labels:
+        st.markdown(f"- {label}")
     st.stop()
 
-# ─── Load ─────────────────────────────────────────────────────────────────────
+# ─── Load & run model (cache busted by content hash) ─────────────────────────
+mh = file_hash(model_bytes)
+fh = file_hash(features_bytes)
+th = file_hash(target_bytes)
+mah = file_hash(mapping_bytes)
+
 try:
-    model                      = load_model(model_path)
-    features, target_df, mapping = load_data(features_path, target_path, mapping_path)
-    raw_predictions            = run_predictions(model, features_path)
+    features, target_df, mapping = load_data_from_bytes(
+        features_bytes, target_bytes, mapping_bytes, fh, th, mah
+    )
+    raw_predictions = run_predictions_from_bytes(model_bytes, features_bytes, mh, fh)
 except Exception as e:
     st.error(f"Error loading or running model: {e}")
     st.stop()
+
+target_col = active_model_cfg["target_col"]
 
 # ─── Build master DataFrame ───────────────────────────────────────────────────
 df = features.copy()
@@ -282,11 +303,8 @@ df["pct_error"] = ((df["actual"] - df["predicted"]) / df["actual"].replace(0, np
 df = df.merge(mapping, on="branch_id", how="left")
 df["branch_name"] = df["branch_name"].fillna(df["branch_id"])
 
-# ─── District filter (now we have data) ──────────────────────────────────────
+# ─── District filter ──────────────────────────────────────────────────────────
 available_districts = sorted(df["branch_district"].dropna().unique().tolist())
-with district_placeholder:
-    pass  # clear placeholder
-
 with st.sidebar:
     district_filter = st.multiselect("Filter by District", options=available_districts, default=[])
 
@@ -306,13 +324,13 @@ st.markdown("### 📈 Overall Model Performance")
 row1_c1, row1_c2, row1_c3 = st.columns(3)
 row1_c1.metric("🏦 Branches",  f"{n_branches:,}",   help="Number of unique branches evaluated")
 row1_c2.metric("📋 Records",   f"{n_records:,}",    help="Total prediction rows in the test dataset")
-row1_c3.metric("📉 MAPE",      f"{mape:.2f}%",      help="Mean Absolute % Error — how far off predictions are as a percentage")
+row1_c3.metric("📉 MAPE",      f"{mape:.2f}%",      help="Mean Absolute % Error")
 
 row2_c1, row2_c2, row2_c3 = st.columns(3)
-row2_c1.metric("📏 MAE",       fmt_etb(mae),         help="Mean Absolute Error — average prediction error in ETB")
-row2_c2.metric("🎯 R² Score",  f"{r2:.4f}",          help="R² of 1.0 = perfect model, 0 = no better than predicting the mean")
+row2_c1.metric("📏 MAE",       fmt_etb(mae),         help="Mean Absolute Error in ETB")
+row2_c2.metric("🎯 R² Score",  f"{r2:.4f}",          help="R² of 1.0 = perfect model")
 over_pct = (df_filtered["error"] < 0).mean() * 100
-row2_c3.metric("⬆️ Over-predicted", f"{over_pct:.1f}%", help="% of time the model predicted MORE than the actual value")
+row2_c3.metric("⬆️ Over-predicted", f"{over_pct:.1f}%", help="% of time the model predicted MORE than actual")
 
 st.markdown("---")
 
@@ -350,7 +368,6 @@ fig_district.update_layout(
 st.plotly_chart(fig_district, use_container_width=True)
 st.markdown('<div class="info-box">💡 Green = MAPE &lt;15% (accurate). Yellow = 15–30% (acceptable). Red = &gt;30% (needs attention).</div>', unsafe_allow_html=True)
 st.markdown("---")
-
 
 # ─── Top / Bottom performing branches ────────────────────────────────────────
 st.markdown("### 🏆 Top Performing vs ⚠️ Hardest Branches")
@@ -423,7 +440,6 @@ with col_bot:
 st.markdown('<div class="info-box">💡 Branches with high MAPE may have unusual or highly variable cash-flow patterns the model hasn\'t fully learned yet.</div>', unsafe_allow_html=True)
 st.markdown("---")
 
-
 # ─── Per-branch prediction explorer ──────────────────────────────────────────
 st.markdown("### 🔍 Per-Branch Prediction Explorer")
 
@@ -450,12 +466,7 @@ bc3.metric("R² (this branch)", f"{b_r2:.4f}")
 bc4.metric("Records",          f"{len(branch_data)}")
 
 if chart_type == "Actual vs Predicted":
-    # ── Build combined hover: hovering on either line shows BOTH values ──
-    # We achieve this by using customdata to carry the "other" value and
-    # building a unified hovertemplate that always shows actual + predicted.
     fig_branch = go.Figure()
-
-    # Actual line — customdata carries the predicted value for the same day
     fig_branch.add_trace(go.Scatter(
         x=branch_data["period"],
         y=branch_data["actual"],
@@ -472,8 +483,6 @@ if chart_type == "Actual vs Predicted":
             "<extra></extra>"
         ),
     ))
-
-    # Predicted line — customdata carries the actual value for the same day
     fig_branch.add_trace(go.Scatter(
         x=branch_data["period"],
         y=branch_data["predicted"],
@@ -490,15 +499,14 @@ if chart_type == "Actual vs Predicted":
             "<extra></extra>"
         ),
     ))
-
     fig_branch.update_layout(
         paper_bgcolor="#0d1426", plot_bgcolor="#0a0f1e",
         font=dict(color="#a0bbd8", family="Sora"),
         xaxis=dict(title="Day Index (sequential)", gridcolor="#1e2d4a"),
-        yaxis=dict(title="Cash-Out (ETB)", gridcolor="#1e2d4a", tickformat=",.0f"),
+        yaxis=dict(title="Cash (ETB)", gridcolor="#1e2d4a", tickformat=",.0f"),
         height=400,
         legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor="#1e3a6e"),
-        hovermode="x unified",   # single vertical line shows both traces at once
+        hovermode="x unified",
         margin=dict(t=20, b=50, l=90, r=20),
     )
     st.markdown('<div class="info-box">💡 Hover anywhere on the chart to see Actual, Predicted, and Error for that day side by side.</div>', unsafe_allow_html=True)
@@ -529,11 +537,10 @@ else:
         showlegend=False,
         margin=dict(t=20, b=50, l=90, r=20),
     )
-    st.markdown('<div class="info-box">💡 Green bars = model under-predicted (actual was higher). Red bars = model over-predicted. Hover any bar to see all values.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-box">💡 Green bars = model under-predicted. Red bars = model over-predicted.</div>', unsafe_allow_html=True)
 
 st.plotly_chart(fig_branch, use_container_width=True)
 st.markdown("---")
-
 
 # ─── Full branch performance table ───────────────────────────────────────────
 st.markdown("### 📋 Full Branch Performance Table")
@@ -559,7 +566,6 @@ st.download_button(
 )
 st.markdown("---")
 
-
 # ─── Optional raw table ───────────────────────────────────────────────────────
 if show_raw_table:
     st.markdown("### 🗃️ Raw Prediction Data")
@@ -567,7 +573,6 @@ if show_raw_table:
     raw.columns = ["Branch ID","Branch Name","District","Day","Actual (ETB)","Predicted (ETB)","Error (ETB)","MAPE (%)"]
     st.dataframe(raw.head(1000), use_container_width=True, height=400)
     st.caption("Showing first 1,000 rows.")
-
 
 # ─── Footer ──────────────────────────────────────────────────────────────────
 st.markdown("---")
