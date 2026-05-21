@@ -23,7 +23,6 @@ from sklearn.metrics import mean_absolute_error, r2_score
 # ─── Page configuration ──────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Cash Prediction Dashboard",
-    page_icon="💵",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -176,11 +175,11 @@ DEFAULT_MODELS = [
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## ⚙️ Configuration")
+    st.markdown("## Configuration")
     st.markdown("---")
 
     # ── Model selector ────────────────────────────────────────────────────────
-    st.markdown("**🤖 Active Model**")
+    st.markdown("**Active Model**")
     model_labels = [m["label"] for m in DEFAULT_MODELS]
     selected_model_label = st.selectbox("Choose model to evaluate", model_labels)
     active_cfg = next(m for m in DEFAULT_MODELS if m["label"] == selected_model_label)
@@ -215,12 +214,12 @@ with st.sidebar:
         help="The test dataset actuals file (e.g. all_out_target_for_test_dataset.csv)",
     )
 
-    st.markdown("---")
-    st.markdown("**🔍 Filters**")
-    district_placeholder = st.empty()
+    #st.markdown("---")
+    #st.markdown("** Filters**")
+    #district_placeholder = st.empty()
 
     st.markdown("---")
-    st.markdown("**📊 Chart Options**")
+    st.markdown("**Chart Options**")
     top_n          = st.slider("Top N branches (over/under-performing)", 5, 30, 10)
     show_raw_table = st.checkbox("Show raw prediction table", value=False)
 
@@ -229,7 +228,7 @@ with st.sidebar:
 
 
 # ─── Title ───────────────────────────────────────────────────────────────────
-st.markdown(f"# 💵 Cash Prediction Dashboard — {selected_model_label}")
+st.markdown(f"#  Cash Prediction Dashboard — {selected_model_label}")
 st.markdown("**Model performance evaluation across branches · Test dataset**")
 st.markdown("---")
 
@@ -297,23 +296,23 @@ mape       = mape_score(y_true, y_pred)
 n_branches = df_filtered["branch_id"].nunique()
 n_records  = len(df_filtered)
 
-st.markdown("### 📈 Overall Model Performance")
+st.markdown("###  Overall Model Performance")
 
 row1_c1, row1_c2, row1_c3 = st.columns(3)
-row1_c1.metric("🏦 Branches", f"{n_branches:,}",  help="Number of unique branches evaluated")
-row1_c2.metric("📋 Records",  f"{n_records:,}",   help="Total prediction rows in the test dataset")
-row1_c3.metric("📉 MAPE",     f"{mape:.2f}%",     help="Mean Absolute % Error — average % difference between predicted and actual")
+row1_c1.metric(" Branches", f"{n_branches:,}",  help="Number of unique branches evaluated")
+row1_c2.metric(" Records",  f"{n_records:,}",   help="Total prediction rows in the test dataset")
+row1_c3.metric(" MAPE",     f"{mape:.2f}%",     help="Mean Absolute % Error — average % difference between predicted and actual")
 
 row2_c1, row2_c2, row2_c3 = st.columns(3)
-row2_c1.metric("📏 MAE",            fmt_etb(mae),  help="Mean Absolute Error — average prediction error in ETB")
-row2_c2.metric("🎯 R² Score",       f"{r2:.4f}",   help="1.0 = perfect model, 0 = no better than predicting the mean")
+row2_c1.metric("MAE",            fmt_etb(mae),  help="Mean Absolute Error — average prediction error in ETB")
+row2_c2.metric(" R² Score",       f"{r2:.4f}",   help="1.0 = perfect model, 0 = no better than predicting the mean")
 over_pct = (df_filtered["error"] < 0).mean() * 100
-#row2_c3.metric("⬆️ Over-predicted", f"{over_pct:.1f}%", help="% of days the model predicted MORE than the actual value")
+#row2_c3.metric("⬆ Over-predicted", f"{over_pct:.1f}%", help="% of days the model predicted MORE than the actual value")
 
 st.markdown("---")
 
 # ─── % Error by District ─────────────────────────────────────────────────────
-st.markdown("### 🗺️ Prediction Accuracy by District")
+st.markdown("###  Prediction Accuracy by District")
 
 district_mape = (
     df_filtered.groupby("branch_district")
@@ -348,7 +347,7 @@ st.markdown('<div class="info-box">💡 Green = MAPE &lt;15% (accurate). Yellow 
 st.markdown("---")
 
 # ─── Top / Bottom performing branches ────────────────────────────────────────
-st.markdown("### 🏆 Top Performing vs ⚠️ Hardest Branches")
+st.markdown("###  Top Performing vs  Hardest Branches")
 
 branch_stats = (
     df_filtered.groupby(["branch_id", "branch_name", "branch_district"])
@@ -366,7 +365,7 @@ branch_stats["bias"] = branch_stats["predicted_mean"] - branch_stats["actual_mea
 col_top, col_bot = st.columns(2)
 
 with col_top:
-    st.markdown(f"#### ✅ Top {top_n} Most Accurate (lowest MAPE)")
+    st.markdown(f"####  Top {top_n} Most Accurate (lowest MAPE)")
     top_branches = branch_stats.nsmallest(top_n, "mape_val")
     fig_top = go.Figure(go.Bar(
         y=top_branches["branch_name"],
@@ -391,7 +390,7 @@ with col_top:
     st.plotly_chart(fig_top, use_container_width=True)
 
 with col_bot:
-    st.markdown(f"#### ⚠️ Top {top_n} Hardest (highest MAPE)")
+    st.markdown(f"####  Top {top_n} Hardest (highest MAPE)")
     bot_branches = branch_stats.nlargest(top_n, "mape_val")
     fig_bot = go.Figure(go.Bar(
         y=bot_branches["branch_name"],
@@ -415,11 +414,11 @@ with col_bot:
     )
     st.plotly_chart(fig_bot, use_container_width=True)
 
-st.markdown('<div class="info-box">💡 Branches with high MAPE may have unusual or highly variable cash-flow patterns the model hasn\'t fully learned yet.</div>', unsafe_allow_html=True)
-st.markdown("---")
+#st.markdown('<div class="info-box">💡 Branches with high MAPE may have unusual or highly variable cash-flow patterns the model hasn\'t fully learned yet.</div>', unsafe_allow_html=True)
+#st.markdown("---")
 
 # ─── Per-branch prediction explorer ──────────────────────────────────────────
-st.markdown("### 🔍 Per-Branch Prediction Explorer")
+st.markdown("###  Per-Branch Prediction Explorer")
 
 search_col, sort_col = st.columns([3, 1])
 with search_col:
@@ -517,7 +516,7 @@ st.plotly_chart(fig_branch, use_container_width=True)
 st.markdown("---")
 
 # ─── Full branch performance table ───────────────────────────────────────────
-st.markdown("### 📋 Full Branch Performance Table")
+st.markdown("###  Full Branch Performance Table")
 
 display_cols = ["branch_name","branch_district","n_records","actual_mean","predicted_mean","mae_val","mape_val","bias"]
 table_df = branch_stats[display_cols].copy()
@@ -533,7 +532,7 @@ table_df = table_df.sort_values(tbl_sort, ascending=tbl_asc)
 
 st.dataframe(table_df, use_container_width=True, height=420)
 st.download_button(
-    label="📥 Download as CSV",
+    label="Download as CSV",
     data=table_df.to_csv(index=False).encode("utf-8"),
     file_name=f"branch_performance_{selected_model_label.replace(' ','_')}.csv",
     mime="text/csv",
@@ -542,10 +541,10 @@ st.markdown("---")
 
 # ─── Optional raw table ───────────────────────────────────────────────────────
 if show_raw_table:
-    st.markdown("### 🗃️ Raw Prediction Data")
+    st.markdown("### Raw Prediction Data")
     raw = df_filtered[["branch_id","branch_name","branch_district","day_of_the_week","actual","predicted","error","pct_error"]].copy()
     raw.columns = ["Branch ID","Branch Name","District","Day","Actual (ETB)","Predicted (ETB)","Error (ETB)","MAPE (%)"]
-    st.dataframe(raw.head(1000), use_container_width=True, height=400)
+    st.dataframe(raw.head(100000), use_container_width=True, height=400)
     st.caption("Showing first 1,000 rows.")
 
 # ─── Footer ──────────────────────────────────────────────────────────────────
