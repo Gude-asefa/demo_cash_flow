@@ -225,7 +225,7 @@ with st.sidebar:
     show_raw_table = st.checkbox("Show raw prediction table", value=False)
 
     st.markdown("---")
-    st.caption("Cash Prediction Dashboard v2.2")
+    st.caption("Cash Prediction Dashboard")
 
 
 # ─── Title ───────────────────────────────────────────────────────────────────
